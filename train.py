@@ -1,4 +1,5 @@
 import os
+import importlib
 import json
 import logging
 import re
@@ -17,6 +18,49 @@ from omegaconf import OmegaConf, open_dict
 from jepa import JEPA
 from module import ARPredictor, Embedder, MLP, SIGReg
 from utils import get_column_normalizer, get_img_preprocessor, ModelObjectCallBack
+
+
+def _get_hdf5_dataset_cls():
+    if hasattr(swm.data, "HDF5Dataset"):
+        return swm.data.HDF5Dataset
+
+    candidates = [
+        "stable_worldmodel.data.hdf5",
+        "stable_worldmodel.data.hdf5_dataset",
+        "stable_worldmodel.data.dataset",
+        "stable_worldmodel.data.datasets",
+    ]
+    for module_name in candidates:
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            continue
+        if hasattr(module, "HDF5Dataset"):
+            return module.HDF5Dataset
+
+    raise ImportError(
+        "Could not find HDF5Dataset in stable_worldmodel. "
+        "Install a compatible stable-world-model version or use swm.data.load_dataset."
+    )
+
+
+def _load_training_dataset(dataset_cfg, transform=None):
+    dataset_cfg = OmegaConf.to_container(dataset_cfg, resolve=True)
+    dataset_name = dataset_cfg.pop("name")
+    cache_dir = os.environ.get("LOCAL_DATASET_DIR") or dataset_cfg.pop("cache_dir", None)
+
+    if hasattr(swm.data, "load_dataset"):
+        return swm.data.load_dataset(
+            dataset_name,
+            transform=transform,
+            cache_dir=cache_dir,
+            **dataset_cfg,
+        )
+
+    HDF5Dataset = _get_hdf5_dataset_cls()
+    if cache_dir is not None:
+        dataset_cfg["cache_dir"] = cache_dir
+    return HDF5Dataset(name=dataset_name, transform=transform, **dataset_cfg)
 
 
 class EpisodeSubset(torch.utils.data.Dataset):
@@ -187,7 +231,7 @@ def run(cfg):
     ##       dataset       ##
     #########################
 
-    dataset = swm.data.HDF5Dataset(**cfg.data.dataset, transform=None)
+    dataset = _load_training_dataset(cfg.data.dataset, transform=None)
     transforms = [get_img_preprocessor(source='pixels', target='pixels', img_size=cfg.img_size)]
 
     train_episodes, val_episodes = _build_scene_disjoint_split(
