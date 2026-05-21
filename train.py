@@ -48,18 +48,32 @@ def _load_training_dataset(dataset_cfg, transform=None):
     dataset_cfg = OmegaConf.to_container(dataset_cfg, resolve=True)
     dataset_name = dataset_cfg.pop("name")
     cache_dir = os.environ.get("LOCAL_DATASET_DIR") or dataset_cfg.pop("cache_dir", None)
+    dataset_path = Path(dataset_name).expanduser()
+    if cache_dir is not None and not dataset_path.exists():
+        cache_dir = Path(cache_dir).expanduser()
+        candidates = [
+            cache_dir / dataset_name,
+            cache_dir / f"{dataset_name}.h5",
+            cache_dir / f"{dataset_name}.hdf5",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                dataset_path = candidate
+                dataset_name = str(candidate)
+                break
 
     if hasattr(swm.data, "load_dataset"):
         return swm.data.load_dataset(
             dataset_name,
             transform=transform,
-            cache_dir=cache_dir,
             **dataset_cfg,
         )
 
     HDF5Dataset = _get_hdf5_dataset_cls()
+    if dataset_path.exists():
+        return HDF5Dataset(name=str(dataset_path), transform=transform, **dataset_cfg)
     if cache_dir is not None:
-        dataset_cfg["cache_dir"] = cache_dir
+        dataset_cfg["cache_dir"] = str(cache_dir)
     return HDF5Dataset(name=dataset_name, transform=transform, **dataset_cfg)
 
 
