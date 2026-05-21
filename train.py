@@ -62,6 +62,10 @@ def _load_training_dataset(dataset_cfg, transform=None):
                 dataset_name = str(candidate)
                 break
 
+    if dataset_path.suffix.lower() in {".h5", ".hdf5"} and dataset_path.exists():
+        HDF5Dataset = _get_hdf5_dataset_cls()
+        return HDF5Dataset(name=str(dataset_path), transform=transform, **dataset_cfg)
+
     if hasattr(swm.data, "load_dataset"):
         return swm.data.load_dataset(
             dataset_name,
