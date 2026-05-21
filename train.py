@@ -16,6 +16,7 @@ from lightning.pytorch.loggers import WandbLogger
 from omegaconf import OmegaConf, open_dict
 
 from jepa import JEPA
+from hdf5_dataset import HDF5Dataset as LocalHDF5Dataset
 from module import ARPredictor, Embedder, MLP, SIGReg
 from utils import get_column_normalizer, get_img_preprocessor, ModelObjectCallBack
 
@@ -38,10 +39,7 @@ def _get_hdf5_dataset_cls():
         if hasattr(module, "HDF5Dataset"):
             return module.HDF5Dataset
 
-    raise ImportError(
-        "Could not find HDF5Dataset in stable_worldmodel. "
-        "Install a compatible stable-world-model version or use swm.data.load_dataset."
-    )
+    return LocalHDF5Dataset
 
 
 def _load_training_dataset(dataset_cfg, transform=None):
