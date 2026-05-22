@@ -1,6 +1,7 @@
 import numpy as np
 import pyarrow as pa
 import torch
+import torch.nn.functional as F
 from pathlib import Path
 
 if not hasattr(pa, "PyExtensionType"):
@@ -12,7 +13,13 @@ from lightning.pytorch.callbacks import Callback
 def get_img_preprocessor(source: str, target: str, img_size: int = 224):
     imagenet_stats = dt.dataset_stats.ImageNet
     to_image = dt.transforms.ToImage(**imagenet_stats, source=source, target=target)
-    resize = dt.transforms.Resize(img_size, source=source, target=target)
+    def resize_fn(x):
+        shape = x.shape
+        x = x.reshape(-1, *shape[-3:])
+        x = F.interpolate(x, size=(img_size, img_size), mode="bilinear", align_corners=False)
+        return x.reshape(*shape[:-2], img_size, img_size)
+
+    resize = dt.transforms.WrapTorchTransform(resize_fn, source=source, target=target)
     return dt.transforms.Compose(to_image, resize)
 
 
