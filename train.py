@@ -20,7 +20,13 @@ from omegaconf import OmegaConf, open_dict
 
 from hdf5_dataset import HDF5Dataset
 from module import SIGReg
-from utils import ModelObjectCallBack, get_column_normalizer, get_img_preprocessor
+from utils import (
+    BestModelObjectCallback,
+    EpochMetricsCallback,
+    ModelObjectCallBack,
+    get_column_normalizer,
+    get_img_preprocessor,
+)
 
 
 def _load_training_dataset(dataset_cfg, transform=None):
@@ -199,7 +205,10 @@ def lejepa_forward(self, batch, stage, cfg):
     output["loss"] = output["pred_loss"] + lambd * output["sigreg_loss"]
 
     losses_dict = {f"{stage}/{k}": v.detach() for k, v in output.items() if "loss" in k}
-    self.log_dict(losses_dict, on_step=True, sync_dist=True)
+    if stage == "validate":
+        self.log_dict(losses_dict, on_step=False, on_epoch=True, sync_dist=True)
+    else:
+        self.log_dict(losses_dict, on_step=True, on_epoch=True, sync_dist=True)
     return output
 
 
@@ -287,12 +296,23 @@ def run(cfg):
     object_dump_callback = ModelObjectCallBack(
         dirpath=run_dir, filename=cfg.output_model_name, epoch_interval=1
     )
+    best_object_callback = BestModelObjectCallback(
+        dirpath=run_dir,
+        filename=cfg.output_model_name,
+        monitor="validate/pred_loss_epoch",
+        mode="min",
+    )
+    epoch_metrics_callback = EpochMetricsCallback(
+        dirpath=run_dir,
+        monitor="validate/pred_loss_epoch",
+        mode="min",
+    )
 
     trainer_kwargs = OmegaConf.to_container(cfg.trainer, resolve=True)
     trainer_kwargs.setdefault("default_root_dir", str(run_dir))
     trainer = pl.Trainer(
         **trainer_kwargs,
-        callbacks=[object_dump_callback],
+        callbacks=[object_dump_callback, best_object_callback, epoch_metrics_callback],
         num_sanity_val_steps=1,
         logger=logger,
         enable_checkpointing=True,
