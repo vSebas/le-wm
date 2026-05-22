@@ -1,6 +1,11 @@
 import numpy as np
+import pyarrow as pa
 import torch
 from pathlib import Path
+
+if not hasattr(pa, "PyExtensionType"):
+    pa.PyExtensionType = pa.ExtensionType
+
 from stable_pretraining import data as dt
 from lightning.pytorch.callbacks import Callback
 
