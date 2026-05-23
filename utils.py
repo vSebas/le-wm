@@ -96,7 +96,7 @@ class BestModelObjectCallback(Callback):
         if trainer.sanity_checking:
             return
 
-        score = trainer.callback_metrics.get(self.monitor)
+        score = _get_metric(trainer.callback_metrics, self.monitor)
         if score is None:
             return
 
@@ -183,6 +183,8 @@ class EpochMetricsCallback(Callback):
 
         row["lr"] = _current_lr(trainer)
         score = _as_float(row.get(self.monitor))
+        if score is None and self.monitor.endswith("_epoch"):
+            score = _as_float(row.get(self.monitor.removesuffix("_epoch")))
         is_best = score is not None and self._is_better(score)
         if is_best:
             self.best_score = score
@@ -267,3 +269,13 @@ def _current_lr(trainer):
     if not param_groups:
         return None
     return float(param_groups[0].get("lr"))
+
+
+def _get_metric(metrics, name):
+    if name in metrics:
+        return metrics[name]
+    if name.endswith("_epoch"):
+        fallback = name.removesuffix("_epoch")
+        if fallback in metrics:
+            return metrics[fallback]
+    return None

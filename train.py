@@ -205,11 +205,53 @@ def lejepa_forward(self, batch, stage, cfg):
     output["loss"] = output["pred_loss"] + lambd * output["sigreg_loss"]
 
     losses_dict = {f"{stage}/{k}": v.detach() for k, v in output.items() if "loss" in k}
+    diagnostics_dict = {
+        f"{stage}/{k}": v
+        for k, v in _latent_diagnostics(emb).items()
+    }
     if stage == "validate":
         self.log_dict(losses_dict, on_step=False, on_epoch=True, sync_dist=True)
+        self.log_dict(diagnostics_dict, on_step=False, on_epoch=True, sync_dist=True)
     else:
         self.log_dict(losses_dict, on_step=True, on_epoch=True, sync_dist=True)
+        self.log_dict(diagnostics_dict, on_step=True, on_epoch=True, sync_dist=True)
     return output
+
+
+def _latent_diagnostics(emb):
+    flat = emb.detach().reshape(-1, emb.shape[-1]).float()
+    mean = flat.mean(dim=0)
+    std = flat.std(dim=0)
+    centered = flat - mean
+    cov = centered.T @ centered / max(flat.shape[0] - 1, 1)
+    offdiag = cov - torch.diag(torch.diag(cov))
+    return {
+        "latent_mean_norm": mean.norm(),
+        "latent_std_mean": std.mean(),
+        "latent_std_min": std.min(),
+        "latent_std_max": std.max(),
+        "latent_cov_offdiag_abs_mean": offdiag.abs().mean(),
+    }
+
+
+def _build_scheduler_config(cfg):
+    scheduler = OmegaConf.to_container(cfg.get("scheduler", {}), resolve=True) or {}
+    scheduler_type = scheduler.pop("type", "LinearWarmupCosineAnnealingLR")
+    interval = scheduler.pop("interval", "epoch")
+    scheduler_cfg = {"type": scheduler_type}
+
+    for key, value in scheduler.items():
+        if value is not None:
+            scheduler_cfg[key] = value
+
+    if interval == "step":
+        max_steps = scheduler_cfg.get("max_steps") or cfg.trainer.get("max_steps")
+        if max_steps is not None:
+            scheduler_cfg["max_steps"] = int(max_steps)
+        if scheduler_cfg.get("warmup_steps") is None:
+            raise ValueError("scheduler.warmup_steps must be set when scheduler.interval=step")
+
+    return scheduler_cfg, interval
 
 
 @hydra.main(version_base=None, config_path="./config/train", config_name="lewm")
@@ -252,13 +294,14 @@ def run(cfg):
     ##############################
 
     world_model = hydra.utils.instantiate(cfg.model)
+    scheduler_cfg, scheduler_interval = _build_scheduler_config(cfg)
 
     optimizers = {
         "model_opt": {
             "modules": "model",
             "optimizer": dict(cfg.optimizer),
-            "scheduler": {"type": "LinearWarmupCosineAnnealingLR"},
-            "interval": "epoch",
+            "scheduler": scheduler_cfg,
+            "interval": scheduler_interval,
         },
     }
 
