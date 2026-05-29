@@ -98,6 +98,37 @@ def _build_scene_disjoint_split(dataset, train_fraction, seed):
     return np.sort(episodes[num_val:]), np.sort(episodes[:num_val])
 
 
+def _build_scene_kfold_split(dataset, test_fraction, num_folds, fold_index, seed):
+    num_episodes = len(dataset.lengths)
+    if num_episodes < 3:
+        raise ValueError("Need at least three episodes for train/val/test scene split.")
+    if num_folds < 2:
+        raise ValueError("num_folds must be at least 2.")
+    if fold_index < 0 or fold_index >= num_folds:
+        raise ValueError(f"fold_index must be in [0, {num_folds}); got {fold_index}.")
+
+    rng = np.random.default_rng(seed)
+    episodes = np.arange(num_episodes)
+    rng.shuffle(episodes)
+
+    num_test = int(np.ceil(num_episodes * float(test_fraction)))
+    num_test = min(max(num_test, 1), num_episodes - num_folds)
+    test_episodes = np.sort(episodes[:num_test])
+    dev_episodes = episodes[num_test:]
+    if len(dev_episodes) < num_folds:
+        raise ValueError(
+            f"Need at least {num_folds} development episodes after test holdout; "
+            f"got {len(dev_episodes)}."
+        )
+
+    folds = np.array_split(dev_episodes, num_folds)
+    val_episodes = np.sort(folds[fold_index])
+    train_episodes = np.sort(
+        np.concatenate([fold for idx, fold in enumerate(folds) if idx != fold_index])
+    )
+    return train_episodes, val_episodes, test_episodes
+
+
 def _load_scene_names(dataset):
     metadata_path = dataset.h5_path.with_name("scene_metadata.jsonl")
     if not metadata_path.exists():
@@ -118,19 +149,43 @@ def _load_scene_names(dataset):
     return scene_names
 
 
-def _save_split(run_dir, dataset, train_episodes, val_episodes, seed, train_fraction):
+def _save_split(
+    run_dir,
+    dataset,
+    train_episodes,
+    val_episodes,
+    seed,
+    train_fraction,
+    test_episodes=None,
+    split_mode="scene_disjoint",
+    test_fraction=None,
+    num_folds=None,
+    fold_index=None,
+):
     scene_names = _load_scene_names(dataset)
     train_episode_set = set(train_episodes.tolist())
     val_episode_set = set(val_episodes.tolist())
+    test_episodes = (
+        np.array([], dtype=np.int64)
+        if test_episodes is None
+        else np.asarray(test_episodes, dtype=np.int64)
+    )
+    test_episode_set = set(test_episodes.tolist())
     split = {
         "dataset": str(dataset.h5_path),
+        "split_mode": split_mode,
         "seed": int(seed),
         "train_fraction": float(train_fraction),
+        "test_fraction": None if test_fraction is None else float(test_fraction),
+        "num_folds": None if num_folds is None else int(num_folds),
+        "fold_index": None if fold_index is None else int(fold_index),
         "num_episodes": int(len(dataset.lengths)),
         "num_train_episodes": int(len(train_episodes)),
         "num_val_episodes": int(len(val_episodes)),
+        "num_test_episodes": int(len(test_episodes)),
         "num_train_clips": int(sum(ep in train_episode_set for ep, _ in dataset.clip_indices)),
         "num_val_clips": int(sum(ep in val_episode_set for ep, _ in dataset.clip_indices)),
+        "num_test_clips": int(sum(ep in test_episode_set for ep, _ in dataset.clip_indices)),
         "train_episodes": [
             {"episode_index": int(ep), "scene_name": scene_names[int(ep)]}
             for ep in train_episodes
@@ -139,8 +194,15 @@ def _save_split(run_dir, dataset, train_episodes, val_episodes, seed, train_frac
             {"episode_index": int(ep), "scene_name": scene_names[int(ep)]}
             for ep in val_episodes
         ],
+        "test_episodes": [
+            {"episode_index": int(ep), "scene_name": scene_names[int(ep)]}
+            for ep in test_episodes
+        ],
     }
-    split_path = run_dir / f"{dataset.h5_path.stem}_scene_split_seed{seed}.json"
+    suffix = f"seed{seed}"
+    if split_mode == "kfold":
+        suffix = f"seed{seed}_test{float(test_fraction):.3f}_fold{fold_index}of{num_folds}"
+    split_path = run_dir / f"{dataset.h5_path.stem}_scene_split_{suffix}.json"
     with split_path.open("w") as f:
         json.dump(split, f, indent=2)
     logging.info("Saved scene-disjoint split to %s", split_path)
@@ -263,9 +325,24 @@ def run(cfg):
     dataset = _load_training_dataset(cfg.data.dataset, transform=None)
     transforms = [get_img_preprocessor(source="pixels", target="pixels", img_size=cfg.img_size)]
 
-    train_episodes, val_episodes = _build_scene_disjoint_split(
-        dataset, cfg.train_split, cfg.seed
-    )
+    split_mode = cfg.get("split_mode", "scene_disjoint")
+    test_episodes = None
+    if split_mode == "scene_disjoint":
+        train_episodes, val_episodes = _build_scene_disjoint_split(
+            dataset, cfg.train_split, cfg.seed
+        )
+    elif split_mode == "kfold":
+        train_episodes, val_episodes, test_episodes = _build_scene_kfold_split(
+            dataset,
+            cfg.test_fraction,
+            int(cfg.num_folds),
+            int(cfg.fold_index),
+            cfg.seed,
+        )
+    else:
+        raise ValueError(
+            f"Unsupported split_mode={split_mode!r}; expected 'scene_disjoint' or 'kfold'."
+        )
     train_row_indices = _episode_row_indices(dataset, train_episodes)
 
     with open_dict(cfg):
@@ -325,14 +402,36 @@ def run(cfg):
         logger.log_hyperparams(OmegaConf.to_container(cfg))
 
     run_dir.mkdir(parents=True, exist_ok=True)
-    _save_split(run_dir, dataset, train_episodes, val_episodes, cfg.seed, cfg.train_split)
-    logging.info(
-        "Using scene-disjoint split: %d train scenes (%d clips), %d val scenes (%d clips)",
-        len(train_episodes),
-        len(train_set),
-        len(val_episodes),
-        len(val_set),
+    _save_split(
+        run_dir,
+        dataset,
+        train_episodes,
+        val_episodes,
+        cfg.seed,
+        cfg.train_split,
+        test_episodes=test_episodes,
+        split_mode=split_mode,
+        test_fraction=cfg.get("test_fraction"),
+        num_folds=cfg.get("num_folds"),
+        fold_index=cfg.get("fold_index"),
     )
+    if test_episodes is None:
+        logging.info(
+            "Using scene-disjoint split: %d train scenes (%d clips), %d val scenes (%d clips)",
+            len(train_episodes),
+            len(train_set),
+            len(val_episodes),
+            len(val_set),
+        )
+    else:
+        logging.info(
+            "Using scene k-fold split: %d train scenes (%d clips), %d val scenes (%d clips), %d held-out test scenes",
+            len(train_episodes),
+            len(train_set),
+            len(val_episodes),
+            len(val_set),
+            len(test_episodes),
+        )
     with open(run_dir / "config.yaml", "w") as f:
         OmegaConf.save(cfg, f)
 

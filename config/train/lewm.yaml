@@ -11,6 +11,10 @@ resume_ckpt_path: null
 
 num_workers: 6
 train_split: 0.9
+split_mode: scene_disjoint
+test_fraction: 0.1
+num_folds: 5
+fold_index: 0
 seed: 3072
 img_size: 224
 patch_size: 14
